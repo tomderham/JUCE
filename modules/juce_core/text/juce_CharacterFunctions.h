@@ -587,6 +587,9 @@ public:
     template <typename CharPointerType1, typename CharPointerType2>
     static int compareUpTo (CharPointerType1 s1, CharPointerType2 s2, int maxChars) noexcept
     {
+        // Must not be negative!
+        jassert (maxChars >= 0);
+
         while (--maxChars >= 0)
         {
             auto c1 = s1.getAndAdvance();
