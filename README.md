@@ -1,3 +1,6 @@
+> **Unofficial fork for [Curve](https://github.com/tomderham/curve):** JUCE `8.0.16-security` with selected fixes backported from 9.x.
+> See [CURVE_FORK.md](CURVE_FORK.md) for the list. Not affiliated with or endorsed by JUCE.
+
 ![alt text](https://assets.juce.com/juce/JUCE_banner_github.png "JUCE")
 
 JUCE is an open-source cross-platform C++ application framework for creating
