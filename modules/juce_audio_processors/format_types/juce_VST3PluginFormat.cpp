@@ -512,7 +512,16 @@ private:
     {
         if (scaleInterface != nullptr)
         {
-            [[maybe_unused]] const auto result = scaleInterface->setContentScaleFactor ((IPlugViewContentScaleSupport::ScaleFactor) getEffectiveScale());
+            const auto scale = getEffectiveScale();
+
+            // Only notify the view when the scale changes. The view would otherwise receive the
+            // same value again once attached, which some plug-ins mishandle.
+            if (lastContentScale.has_value() && exactlyEqual (*lastContentScale, scale))
+                return;
+
+            lastContentScale = scale;
+
+            [[maybe_unused]] const auto result = scaleInterface->setContentScaleFactor ((IPlugViewContentScaleSupport::ScaleFactor) scale);
 
            #if ! JUCE_MAC
             [[maybe_unused]] const auto warning = warnOnFailure (result);
@@ -582,6 +591,7 @@ private:
     IPlugViewContentScaleSupport* scaleInterface = nullptr;
     float nativeScaleFactor = 1.0f;
     float userScaleFactor = 1.0f;
+    std::optional<float> lastContentScale;
 
     struct ScaleNotifierCallback
     {
