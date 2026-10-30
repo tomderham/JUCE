@@ -5,7 +5,7 @@ This is an **unofficial fork** of [JUCE](https://github.com/juce-framework/JUCE)
 ## Branch `curve/8.0.16`
 Upstream tag [`8.0.16-security`](https://github.com/juce-framework/JUCE/tree/8.0.16-security), plus fixes cherry-picked from JUCE 9.0.4 that are relevant to Curve on macOS: an audio plug-in host using VST3 and AU, CoreMIDI, network downloads and modal dialogs. Fixes for other platforms and new features are not included, and neither is JUCE 9's CoreAudio rewrite.
 
-Each commit is a cherry-pick of the upstream commit listed below, which its commit message records as `(cherry picked from commit …)`.
+Each commit is a cherry-pick of the upstream commit listed below, which its commit message records as `(cherry picked from commit …)`, apart from the Curve-specific commits listed under [Curve-specific fixes](#curve-specific-fixes).
 
 | Upstream commit | Change |
 |---|---|
@@ -32,6 +32,11 @@ Each commit is a cherry-pick of the upstream commit listed below, which its comm
 - **Timer: Synchronously stop the TimerThread when shutting down:** JUCE 9's `stopThread()`, which waits indefinitely, became `stopThread (-1)`, its JUCE 8 equivalent. (2026-10-15)
 
 Apart from that, the cherry-picked commits are unchanged.
+
+### Curve-specific fixes
+These commits are not from upstream.
+
+- **ModalComponentManager (macOS): Don't lower popup menus when raising modal windows:** `5fc8d3485d` moves the frontmost modal window to the modal panel level. Popup menus are modal and sit above that level, so each open submenu dropped behind its parent menu, which is visible when the two overlap. A window now keeps its level if that level is already higher. As of 2026-10-30, upstream `develop` still has the original behaviour; drop this commit if upstream fixes it.
 
 ## Updating
 When JUCE publishes a new 8.x tag, rebase this branch onto it, and drop any commit that the tag already contains.

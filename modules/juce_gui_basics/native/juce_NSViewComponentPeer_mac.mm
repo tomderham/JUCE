@@ -2125,7 +2125,9 @@ private:
                     if (! storedLevel.has_value())
                         storedLevel = [window level];
 
-                    return NSModalPanelWindowLevel;
+                    // Never lower a window here: popup menus are modal and already sit above this
+                    // level, so lowering a submenu would put it behind its parent menu.
+                    return jmax (*storedLevel, (NSWindowLevel) NSModalPanelWindowLevel);
                 }
             }
 
