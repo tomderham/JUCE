@@ -39,6 +39,7 @@ These commits are not from upstream.
 
 - **ModalComponentManager (macOS): Don't lower popup menus when raising modal windows:** `5fc8d3485d` moves the frontmost modal window to the modal panel level. Popup menus are modal and sit above that level, so each open submenu dropped behind its parent menu, which is visible when the two overlap. A window now keeps its level if that level is already higher. As of 2026-10-30, upstream `develop` still has the original behaviour; drop this commit if upstream fixes it.
 - **VST3 Host: Only send setContentScaleFactor when the scale changes:** the host window sends the scale before and after attaching the view, and some plug-ins mishandle the repeat. As of 2026-10-30, upstream `develop` still sends the repeat; drop this commit if upstream fixes it.
+- **AU Host: Allow auxiliary output buses to be disabled:** `isBusesLayoutSupported` rejected every disabled bus, so the Enabled toggle in a host's I/O configuration could never switch off the extra outputs of a multi-output instrument. A disabled output bus other than the main one now keeps the AU's stream format and is not rendered. As of 2026-10-30, upstream `develop` still rejects disabled buses; drop this change if upstream fixes it.
 
 ## Updating
 When JUCE publishes a new 8.x tag, rebase this branch onto it, and drop any commit that the tag already contains.

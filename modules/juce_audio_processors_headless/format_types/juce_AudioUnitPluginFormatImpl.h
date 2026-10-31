@@ -955,7 +955,14 @@ public:
                 auto& possible = supported.getReference (busIdx);
 
                 if (requested.isDisabled())
+                {
+                    // Curve: an auxiliary output bus can be switched off. The AU keeps its stream
+                    // format and the bus is simply never rendered (see processAudio).
+                    if (! isInput && busIdx > 0)
+                        continue;
+
                     return false;
+                }
 
                 if (possible.size() > 0 && ! possible.contains (requested))
                     return false;
@@ -1023,6 +1030,11 @@ public:
             for (UInt32 busIndex = 0; busIndex < busCount; ++busIndex)
             {
                 const auto& set = layouts.getChannelSet (isInput, (int) busIndex);
+
+                // Curve: disabled auxiliary output buses keep the AU's stream format and are not rendered
+                if (! isInput && busIndex > 0 && set.isDisabled())
+                    continue;
+
                 const auto currentStream = AudioUnitFormatHelpers::tryGetProperty<AudioStreamBasicDescription> (audioUnit, kAudioUnitProperty_StreamFormat, scope, busIndex);
 
                 if (! currentStream.has_value())
@@ -1413,6 +1425,10 @@ public:
             for (int i = 0; i < numOutputBuses; ++i)
             {
                 AudioUnitRenderActionFlags flags = 0;
+
+                // Curve: don't pull a disabled auxiliary output bus
+                if (i > 0 && ! getBus (false, i)->isEnabled())
+                    continue;
 
                 if (AUBuffer* buf = outputBufferList[i])
                     AudioUnitRender (audioUnit, &flags, &timeStamp, static_cast<UInt32> (i), (UInt32) numSamples, buf->bufferList.get());
