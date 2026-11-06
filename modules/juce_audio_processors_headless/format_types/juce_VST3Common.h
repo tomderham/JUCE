@@ -998,7 +998,7 @@ class HostBufferMapper
 {
 public:
     /*  Builds a cached map of juce <-> vst3 channel mappings. */
-    void prepare (std::vector<ChannelMapping> arrangements)
+    void prepare (std::vector<ChannelMapping> arrangements, int maxSamplesPerBlock)
     {
         mappings = std::move (arrangements);
 
@@ -1007,12 +1007,22 @@ public:
         doubleBusMap.resize (numBuses);
         busBuffers  .resize (numBuses);
 
+        int numInactiveChannels = 0;
+
         for (auto [index, busMap] : enumerate (mappings, size_t{}))
         {
             const auto numChannels = busMap.size();
             floatBusMap [index].reserve (numChannels);
             doubleBusMap[index].reserve (numChannels);
+
+            if (! busMap.isActive())
+                numInactiveChannels += (int) numChannels;
         }
+
+        // Curve: inactive buses get scratch channels instead of nullptrs, because some plug-ins
+        // write to every bus they report without checking whether the host activated it
+        floatScratch .setSize (numInactiveChannels, maxSamplesPerBlock);
+        doubleScratch.setSize (numInactiveChannels, maxSamplesPerBlock);
     }
 
     /*  Applies the mapping to an AudioBuffer using JUCE channel layout. */
@@ -1020,12 +1030,14 @@ public:
     Steinberg::Vst::AudioBusBuffers* getVst3LayoutForJuceBuffer (AudioBuffer<FloatType>& source)
     {
         int channelIndexOffset = 0;
+        int scratchIndexOffset = 0;
 
         for (size_t i = 0; i < mappings.size(); ++i)
         {
             const auto& mapping = mappings[i];
-            associateBufferTo (busBuffers[i], get (detail::Tag<FloatType>{})[i], source, mapping, channelIndexOffset);
+            associateBufferTo (busBuffers[i], get (detail::Tag<FloatType>{})[i], source, mapping, channelIndexOffset, scratchIndexOffset);
             channelIndexOffset += mapping.isActive() ? (int) mapping.size() : 0;
+            scratchIndexOffset += mapping.isActive() ? 0 : (int) mapping.size();
         }
 
         return busBuffers.data();
@@ -1046,7 +1058,8 @@ private:
                             Bus<FloatType>& bus,
                             AudioBuffer<FloatType>& buffer,
                             const ChannelMapping& busMap,
-                            int channelStartOffset) const
+                            int channelStartOffset,
+                            int scratchStartOffset)
     {
         // If this is hit, we may be about to allocate memory. Ideally, this should have been
         // allocated in prepare().
@@ -1054,10 +1067,30 @@ private:
 
         bus.clear();
 
+        auto& scratch = getScratch (detail::Tag<FloatType>{});
+        const auto numSamples = buffer.getNumSamples();
+
+        // If this is hit, the block is larger than the size passed to prepare()
+        const auto scratchFits = numSamples <= scratch.getNumSamples();
+        jassert (busMap.isActive() || scratchFits);
+
         for (size_t i = 0; i < busMap.size(); ++i)
         {
-            bus.push_back (busMap.isActive() ? buffer.getWritePointer (channelStartOffset + busMap.getJuceChannelForVst3Channel ((int) i))
-                                             : nullptr);
+            if (busMap.isActive())
+            {
+                bus.push_back (buffer.getWritePointer (channelStartOffset + busMap.getJuceChannelForVst3Channel ((int) i)));
+            }
+            else if (scratchFits)
+            {
+                // Cleared every block, so a plug-in reading an inactive input hears silence
+                auto* channel = scratch.getWritePointer (scratchStartOffset + (int) i);
+                FloatVectorOperations::clear (channel, numSamples);
+                bus.push_back (channel);
+            }
+            else
+            {
+                bus.push_back (nullptr);
+            }
         }
 
         assignRawPointer (vstBuffers, bus.data());
@@ -1068,8 +1101,14 @@ private:
     auto& get (detail::Tag<float>)    { return floatBusMap; }
     auto& get (detail::Tag<double>)   { return doubleBusMap; }
 
+    auto& getScratch (detail::Tag<float>)    { return floatScratch; }
+    auto& getScratch (detail::Tag<double>)   { return doubleScratch; }
+
     BusMap<float>  floatBusMap;
     BusMap<double> doubleBusMap;
+
+    AudioBuffer<float>  floatScratch;
+    AudioBuffer<double> doubleScratch;
 
     std::vector<Steinberg::Vst::AudioBusBuffers> busBuffers;
     std::vector<ChannelMapping> mappings;
