@@ -855,10 +855,14 @@ private:
               processor (*n->getProcessor()),
               audioChannelsToUse (audioChannelsUsed),
               audioChannels ((size_t) jmax (1, totalNumChans), nullptr),
-              midiBufferToUse (midiBufferIndex)
+              midiBufferToUse (midiBufferIndex),
+              usesMidi (processor.acceptsMidi() || processor.producesMidi()),
+              wasSuspended (processor.isSuspended())
         {
             while (audioChannelsToUse.size() < (int) audioChannels.size())
                 audioChannelsToUse.add (0);
+
+            releases.ensureSize (1024);
         }
 
         void prepare (FloatType* const* renderBuffer, MidiBuffer* buffers) final
@@ -867,6 +871,10 @@ private:
                 audioChannels[i] = renderBuffer[audioChannelsToUse.getUnchecked ((int) i)];
 
             midiBuffer = buffers + midiBufferToUse;
+
+            // Room for the releases a suspended node adds (see releaseNotesFirst()), so swapping with
+            // the spare buffer never leaves either too small to use without allocating
+            midiBuffer->ensureSize (1024);
         }
 
         void process (const Context& c) final
@@ -886,16 +894,105 @@ private:
 
             if (processor.isSuspended())
             {
+                // The node's MIDI buffer holds the events routed to it, which would otherwise pass
+                // through a suspended node unprocessed. Only note releases pass, so the nodes after
+                // it aren't left holding notes that started before it was suspended
                 buffer.clear();
+
+                if (usesMidi)
+                {
+                    addInputWhileSuspended (c.globalIO, *midiBuffer, c.numSamples);
+                    keepOnlyReleases (*midiBuffer);
+                }
+
+                wasSuspended = true;
+                wasOutputMuted = false;
             }
             else
             {
+                // Notes it was playing when suspended never got their releases
+                if (std::exchange (wasSuspended, false) && processor.acceptsMidi())
+                    releaseNotesFirst (*midiBuffer);
+
                 const auto bypass = node->isBypassed() && processor.getBypassParameter() == nullptr;
+
+                // Ringing out in silence: no audio or new notes in, and nothing out but releases, so
+                // its tails decay to nothing. Notes it's holding, e.g. with the sustain pedal, are
+                // released as it starts, so they don't keep feeding its tails
+                const auto outputMuted = node->isOutputMuted();
+
+                if (outputMuted)
+                {
+                    buffer.clear();
+
+                    if (usesMidi)
+                        keepOnlyReleases (*midiBuffer);
+
+                    if (! std::exchange (wasOutputMuted, true) && processor.acceptsMidi())
+                        releaseNotesFirst (*midiBuffer);
+                }
+                else
+                {
+                    wasOutputMuted = false;
+                }
+
                 processWithBuffer (c.globalIO, bypass, buffer, *midiBuffer);
+
+                if (outputMuted)
+                {
+                    buffer.clear();
+
+                    if (usesMidi)
+                        keepOnlyReleases (*midiBuffer);
+                }
             }
         }
 
         virtual void processWithBuffer (const GlobalIO&, bool bypass, AudioBuffer<FloatType>& audio, MidiBuffer& midi) = 0;
+
+        // While suspended, the events a node would have passed on that come from outside the graph,
+        // so their releases still pass (see MidiInOp)
+        virtual void addInputWhileSuspended (const GlobalIO&, MidiBuffer&, int /*numSamples*/) {}
+
+        // Note-offs, all notes off, all sound off and sustain off. From the raw bytes, so as not to
+        // allocate on the audio thread
+        void keepOnlyReleases (MidiBuffer& midi)
+        {
+            releases.clear();
+
+            for (const auto event : midi)
+            {
+                const auto* d = event.data;
+                const auto status = event.numBytes > 0 ? (d[0] & 0xf0) : 0;
+
+                const bool isRelease = (status == 0x80 && event.numBytes >= 3)
+                                    || (status == 0x90 && event.numBytes >= 3 && d[2] == 0)
+                                    || (status == 0xb0 && event.numBytes >= 3
+                                        && (d[1] == 123 || d[1] == 120 || (d[1] == 64 && d[2] < 64)));
+
+                if (isRelease)
+                    releases.addEvent (d, event.numBytes, event.samplePosition);
+            }
+
+            midi.swapWith (releases);
+        }
+
+        // Sustain off, all notes off and all sound off on every channel, before the block's own
+        // events, so a note starting at its first sample still plays
+        void releaseNotesFirst (MidiBuffer& midi)
+        {
+            releases.clear();
+
+            for (int channel = 1; channel <= 16; ++channel)
+            {
+                releases.addEvent (MidiMessage::controllerEvent (channel, 64, 0), 0);
+                releases.addEvent (MidiMessage::allNotesOff (channel), 0);
+                releases.addEvent (MidiMessage::allSoundOff (channel), 0);
+            }
+
+            releases.addEvents (midi, 0, -1, 0);
+            midi.swapWith (releases);
+        }
 
         const Node::Ptr node;
         AudioProcessor& processor;
@@ -904,6 +1001,10 @@ private:
         Array<int> audioChannelsToUse;
         std::vector<FloatType*> audioChannels;
         const int midiBufferToUse;
+
+        const bool usesMidi;   // a node with no MIDI leaves its MIDI buffer alone
+        bool wasSuspended, wasOutputMuted = false;
+        MidiBuffer releases;
     };
 
     struct ProcessOp final : public NodeOp
@@ -978,6 +1079,13 @@ private:
         {
             if (! bypass)
                 midi.addEvents (g.midiIn, 0, audio.getNumSamples(), 0);
+        }
+
+        // Releases from the MIDI inputs still pass while suspended, so the nodes after it aren't
+        // left holding notes played before
+        void addInputWhileSuspended (const GlobalIO& g, MidiBuffer& midi, int numSamples) override
+        {
+            midi.addEvents (g.midiIn, 0, numSamples, 0);
         }
     };
 

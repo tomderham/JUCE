@@ -166,6 +166,14 @@ public:
         */
         bool userRequestedBypass() const { return bypassed; }
 
+        /** Keeps processing the node, but passes on nothing from it apart from note releases, and
+            gives it no MIDI apart from note releases, so a node being muted can ring out in
+            silence before it's suspended. Can be called from any thread. Not for the graph's
+            I/O nodes, which pass to the device as they're processed.
+        */
+        void setOutputMuted (bool shouldBeMuted) noexcept   { outputMuted = shouldBeMuted; }
+        bool isOutputMuted() const noexcept                 { return outputMuted; }
+
         /** @internal
 
             To create a new node, use AudioProcessorGraph::addNode.
@@ -179,7 +187,7 @@ public:
     private:
         //==============================================================================
         std::unique_ptr<AudioProcessor> processor;
-        std::atomic<bool> bypassed { false };
+        std::atomic<bool> bypassed { false }, outputMuted { false };
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Node)
     };
