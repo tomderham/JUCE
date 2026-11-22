@@ -1332,6 +1332,22 @@ public:
         incomingMidi.clear();
     }
 
+    // Clears the AU's tails and voices, without the slow uninitialise and initialise of
+    // releaseResources() and prepareToPlay(). Under the callback lock, as VST3's is, so it can't
+    // run during a render
+    void reset() override
+    {
+        const ScopedLock sl (getCallbackLock());
+
+        if (prepared)
+        {
+            resetBuses();
+            AudioUnitReset (audioUnit, kAudioUnitScope_Global, 0);
+        }
+
+        incomingMidi.clear();
+    }
+
     void resetBuses()
     {
         for (int i = 0; i < getBusCount (true);  ++i)  AudioUnitReset (audioUnit, kAudioUnitScope_Input,  static_cast<UInt32> (i));
