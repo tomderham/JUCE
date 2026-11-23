@@ -847,8 +847,6 @@ public:
 
     ~AudioUnitPluginInstanceHeadless() override
     {
-        const ScopedLock sl (lock);
-
        #if JUCE_DEBUG
         // this indicates that some kind of recursive call is getting triggered that's
         // deleting this plugin while it's still under construction.
@@ -865,7 +863,11 @@ public:
 
                 void messageCallback() override
                 {
-                    auInstance.cleanup();
+                    {
+                        const ScopedLock sl (auInstance.lock);
+                        auInstance.cleanup();
+                    }
+
                     completionSignal.signal();
                 }
 
@@ -875,10 +877,13 @@ public:
 
             if (MessageManager::getInstance()->isThisTheMessageThread())
             {
+                const ScopedLock sl (lock);
                 cleanup();
             }
             else
             {
+                // Don't hold the lock while waiting, as the message thread may need it
+                // first, e.g. to handle a parameter or preset change the plug-in posted
                 WaitableEvent completionEvent;
                 (new AUDeleter (*this, completionEvent))->post();
                 completionEvent.wait();
