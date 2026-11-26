@@ -1015,13 +1015,68 @@ private:
                    int midiBufferIndex,
                    AudioBuffer<float>& tempBuffer)
             : NodeOp (n, audioChannelsUsed, totalNumChans, midiBufferIndex),
-              temporaryBuffer (tempBuffer)
-        {}
+              temporaryBuffer (tempBuffer),
+              bypassMix (n->isBypassed() && n->getProcessor()->getBypassParameter() == nullptr ? 1.0f : 0.0f)
+        {
+            // Room to crossfade a block as large as the processor was prepared for
+            const auto blockSize = this->processor.getBlockSize();
+            const auto sampleRate = this->processor.getSampleRate();
+
+            if (blockSize > 0 && sampleRate > 0.0)
+            {
+                dryBuffer.setSize (jmax (1, totalNumChans), blockSize);
+                bypassFadeStep = (float) (1.0 / jmax (1.0, sampleRate * bypassFadeSeconds));
+            }
+        }
 
         void processWithBuffer (const GlobalIO&, bool bypass, AudioBuffer<FloatType>& audio, MidiBuffer& midi) final
         {
             const ScopedLock lock { this->processor.getCallbackLock() };
-            callProcess (bypass, audio, midi);
+
+            const auto target = bypass ? 1.0f : 0.0f;
+            const auto numSamples = audio.getNumSamples();
+            const auto numChannels = audio.getNumChannels();
+
+            // Bypass switched without a bypass parameter, which a plug-in would smooth itself. Fades
+            // between the processed audio and the input passed through as processBlockBypassed()
+            // passes it, rather than stepping from one to the other, which clicks. If the block is
+            // too large to fade, it switches straight away
+            if (bypassMix == target || bypassFadeStep <= 0.0f
+                || numSamples > dryBuffer.getNumSamples() || numChannels > dryBuffer.getNumChannels())
+            {
+                bypassMix = target;
+                callProcess (bypass, audio, midi);
+                return;
+            }
+
+            const auto numInputs = jmin (numChannels, this->processor.getTotalNumInputChannels());
+
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                if (ch < numInputs)
+                    dryBuffer.copyFrom (ch, 0, audio, ch, 0, numSamples);
+                else
+                    dryBuffer.clear (ch, 0, numSamples);
+            }
+
+            callProcess (false, audio, midi);
+
+            auto mix = bypassMix;
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                mix = mix < target ? jmin (target, mix + bypassFadeStep)
+                                   : jmax (target, mix - bypassFadeStep);
+
+                for (int ch = 0; ch < numChannels; ++ch)
+                {
+                    auto* out = audio.getWritePointer (ch);
+                    const auto dry = dryBuffer.getReadPointer (ch)[i];
+                    out[i] = out[i] + (FloatType) mix * (dry - out[i]);
+                }
+            }
+
+            bypassMix = mix;
         }
 
         void callProcess (bool bypass, AudioBuffer<float>& buffer, MidiBuffer& midi)
@@ -1069,6 +1124,11 @@ private:
         }
 
         AudioBuffer<float>& temporaryBuffer;
+
+        // How far the output has faded from processed (0) to bypassed (1)
+        static constexpr double bypassFadeSeconds = 0.015;
+        AudioBuffer<FloatType> dryBuffer;
+        float bypassMix = 0.0f, bypassFadeStep = 0.0f;
     };
 
     struct MidiInOp final : public NodeOp
@@ -2550,6 +2610,79 @@ public:
                 const auto expected = i == latencySamples ? 2.0f : 0.0f;
                 expect (exactlyEqual (audio.getSample (0, i), expected));
             }
+        }
+
+        beginTest ("bypassing a node without a bypass parameter crossfades rather than stepping");
+        {
+            AudioProcessorGraph graph;
+            graph.setBusesLayout ({ { AudioChannelSet::stereo() }, { AudioChannelSet::stereo() } });
+
+            // Sums its inputs onto its first output: with 1 on both inputs, 2 processed and 1 bypassed
+            const auto node = graph.addNode (BasicProcessor::make (BasicProcessor::getStereoProperties(), MidiIn::no, MidiOut::no));
+            const auto input = graph.addNode (std::make_unique<AudioProcessorGraph::AudioGraphIOProcessor> (AudioProcessorGraph::AudioGraphIOProcessor::IODeviceType::audioInputNode));
+            const auto output = graph.addNode (std::make_unique<AudioProcessorGraph::AudioGraphIOProcessor> (AudioProcessorGraph::AudioGraphIOProcessor::IODeviceType::audioOutputNode));
+
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                expect (graph.addConnection ({ { input->nodeID, ch }, { node->nodeID, ch } }));
+                expect (graph.addConnection ({ { node->nodeID, ch }, { output->nodeID, ch } }));
+            }
+
+            constexpr auto sampleRate = 44100.0;
+            constexpr auto blockSize = 128;
+            graph.prepareToPlay (sampleRate, blockSize);
+
+            AudioBuffer<float> audio (2, blockSize);
+            MidiBuffer midi;
+
+            // The first output over the given number of blocks
+            const auto render = [&] (int numBlocks)
+            {
+                std::vector<float> out;
+
+                for (int b = 0; b < numBlocks; ++b)
+                {
+                    for (int ch = 0; ch < 2; ++ch)
+                        FloatVectorOperations::fill (audio.getWritePointer (ch), 1.0f, blockSize);
+
+                    graph.processBlock (audio, midi);
+                    out.insert (out.end(), audio.getReadPointer (0), audio.getReadPointer (0) + blockSize);
+                }
+
+                return out;
+            };
+
+            const auto fadeSamples = (int) (sampleRate * 0.015);
+            const auto maxStep = 1.0f / (float) fadeSamples + 1.0e-5f;
+
+            const auto expectFade = [&] (const std::vector<float>& out, float from, float to)
+            {
+                auto previous = from;
+
+                for (auto sample : out)
+                {
+                    expect (std::abs (sample - previous) <= maxStep);
+                    previous = sample;
+                }
+
+                expectWithinAbsoluteError (out.back(), to, 1.0e-5f);
+            };
+
+            expect (exactlyEqual (render (1).back(), 2.0f));
+
+            node->setBypassed (true);
+            expectFade (render (fadeSamples / blockSize + 2), 2.0f, 1.0f);
+
+            node->setBypassed (false);
+            expectFade (render (fadeSamples / blockSize + 2), 1.0f, 2.0f);
+
+            // Switched back partway through, it fades back from where it had got to
+            node->setBypassed (true);
+            const auto partway = render (1);
+            node->setBypassed (false);
+            const auto back = render (fadeSamples / blockSize + 2);
+            expect (std::abs (back.front() - partway.back()) <= maxStep);
+            expectFade (back, partway.back(), 2.0f);
         }
 
         beginTest ("graph can be prepared and unprepared from a background thread");
